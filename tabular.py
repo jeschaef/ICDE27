@@ -160,14 +160,15 @@ model = pretrain()
 
 
 # Experimental setup
-delta = 0.2
-m = 64
-k = 100
-epochs = 30
-subset_n = 100
-n_subsets = 50
-crmo_lr = 1e-3
-s_algorithm=KMeans
+delta = 0.2                 # perturbation radius used by the metrics
+m = 64                      # number of sampled instances (robustness)
+k = 100                     # perturbations per instance
+subset_n = 100              # evaluation subset size
+n_subsets = 50              # random removal subsets per instance (faithfulness)
+
+crmo_lr = 1e-3              # CRMO learning rate (use same optimizer for momentum)
+
+s_algorithm=KMeans          # Stability parameters
 s_min_k=2
 s_max_k=10
 
