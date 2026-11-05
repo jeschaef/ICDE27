@@ -6,8 +6,6 @@ d_X=cityblock,0.9273,0.8,0.5495,0.857,ig,"stability (ARI, max over k-grid)"
 d_X=cosine,0.9273,0.8,0.5322,0.8809,ig,"stability (ARI, max over k-grid)"
 d_E=cityblock,0.9636,0.9,0.5489,0.859,gradshap,"stability (ARI, max over k-grid)"
 d_E=cosine,0.8441,0.6669,2.0436,4.34,gradshap,"stability (ARI, max over k-grid)"
-n_inst=100,1.0,1.0,0.3611,0.5952,gradshap,"stability (ARI, max over k-grid)"
-n_inst=2000 (n=531),0.8909,0.8,0.2736,0.6602,gradshap,"stability (ARI, max over k-grid)"
 ARI_max,1.0,1.0,0.0,0.0,gradshap,stability: CVI choice (same clustering)
 AMI_max,0.9636,0.9,0.5381,0.9119,gradshap,stability: CVI choice (same clustering)
 V_max,0.8909,0.8,0.6334,1.0393,gradshap,stability: CVI choice (same clustering)

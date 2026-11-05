@@ -20,7 +20,7 @@ from util import match_columns
 
 # ------------------------------ configuration ------------------------------
 seed = 199
-EXPLAINER = "gradshap"
+EXPLAINER = "ixg"
 noise_small = 0.05        # small noise: fraction of the per-feature explanation std
 noise_large = 0.50        # large noise: fraction of the per-feature explanation std
 

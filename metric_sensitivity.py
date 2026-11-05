@@ -61,9 +61,9 @@ STAB_CONFIGS = [
     ("d_X=cosine", "agg-average", "cosine", "euclidean", 500),
     ("d_E=cityblock", "agg-average", "euclidean", "cityblock", 500),
     ("d_E=cosine", "agg-average", "euclidean", "cosine", 500),
-    ("n_inst=100", "kmeans", None, None, 100),
-    ("n_inst=2000", "kmeans", None, None, 2000),
-    ("n_inst=all", "kmeans", None, None, None),
+    # ("n_inst=100", "kmeans", None, None, 100),
+    # ("n_inst=2000", "kmeans", None, None, 2000),
+    # ("n_inst=all", "kmeans", None, None, None),
 ]
 
 # (name, m instances, n pairs, input distance, explanation distance)
