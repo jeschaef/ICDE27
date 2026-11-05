@@ -1,59 +1,3 @@
-'''
-Metric validity & sensitivity analysis for the tabular explanation pipeline.
-
-Goal
-----
-Determine whether the stability / robustness scores and the resulting
-EXPLAINER RANKINGS depend excessively on implementation choices. The trained
-classifier and the dataset stay fixed; the explanations of every explainer
-are computed once, and each metric is then re-evaluated under a range of
-implementation choices (one factor at a time around the tabular.py defaults).
-
-Stability (cluster agreement, ARI/AMI/V over the k-grid, as in tabular.py)
-    * clustering algorithm       KMeans vs agglomerative (average / complete)
-    * input-space distance       euclidean / cityblock / cosine (precomputed)
-    * explanation-space distance euclidean / cityblock / cosine (precomputed)
-    * cluster validity index     ARI / AMI / V-measure, max vs mean aggregation
-    * number of instances        100 / 500 / 2000 / all
-  Note: KMeans is tied to the Euclidean distance, so the distance knobs are
-  evaluated with agglomerative clustering on precomputed distance matrices.
-
-Structural discrepancy (the L_stab quantity of CRMO on detached matrices)
-    * number of instances m      32 / 64 / 128 / 256
-    * number of pairs            128 / 512 / 2048 (identical for all explainers)
-    * input / explanation dist   L2 / L1 / cosine
-
-Robustness (local mirror of robustness_torch; same seed -> identical
-instance sample and perturbation stream across configs)
-    * neighborhood radius delta  0.1 / 0.2 / 0.4
-    * perturbation distribution  gaussian / uniform / laplace (unit variance)
-    * normalization constant z_E 0.50 / 0.95 / 0.99 / 1.00 quantile of the
-                                 pairwise explanation distances
-    * accepted neighbors k       25 / 100 / 200
-    * preservation criterion     prediction_preserving vs all
-
-Report
-------
-For every family a pivot table (explainer x configuration) is printed and
-saved, plus a summary with, per configuration: Spearman / Kendall rank
-correlation of the explainer ranking against the baseline ranking, mean and
-max relative score change, and the best explainer.
-
-Interpretation: rho / tau close to 1.0 mean the ranking is an implementation-
-robust finding; large relative score changes with stable rankings mean the
-absolute numbers are choice-dependent but the comparison is not. Absolute
-changes across the delta / distribution / criterion configs partially reflect
-the intended change of the measured quantity, not metric instability.
-
-Outputs
--------
-    results/sensitivity_stability.csv            explainer x config (ARI max)
-    results/sensitivity_stability_cvi.csv        CVI choice on the baseline clustering
-    results/sensitivity_discrepancy.csv          explainer x config
-    results/sensitivity_robustness.csv           explainer x config
-    results/sensitivity_robustness_validrate.csv accepted-neighbor rate per config
-    results/sensitivity_summary.csv              rank correlations / score shifts
-'''
 import copy
 import math
 import warnings
@@ -283,8 +227,8 @@ def pair_distance(a, b, name):
     if name == "l1":
         return (a - b).abs().sum(dim=-1)
     if name == "cosine":
-        an = a / a.norm(dim=-1).clamp_min(1e-12)
-        bn = b / b.norm(dim=-1).clamp_min(1e-12)
+        an = a / a.norm(dim=-1, keepdim=True).clamp_min(1e-12)
+        bn = b / b.norm(dim=-1, keepdim=True).clamp_min(1e-12)
         return 1.0 - (an * bn).sum(dim=-1)
     raise ValueError(f"unknown distance '{name}'")
 
@@ -440,7 +384,7 @@ def run_stability_sensitivity(X_all, exp_by_explainer):
     rows = []
     for cfg_name, algorithm, d_X, d_E, n_eff in configs:
         idx = idx_pool[:n_eff]
-        X_np = X_all[idx].numpy()
+        X_np = X_all[idx].detach().numpy()
         A_labels = {k: fit_cluster(X_np, k, algorithm, d_X) for k in ks}
         for E in EXPLAINERS:
             E_np = exp_by_explainer[E][idx].numpy()
@@ -506,83 +450,76 @@ def run_robustness_sensitivity(X_all, model, exp_by_explainer, num_idx, ohe_grou
     return pd.DataFrame(rows), pd.DataFrame(valid_rows), [c[0] for c in ROB_CONFIGS]
 
 
-# ---------------------------------- main ------------------------------------
-def main():
-    X_all, y_all, train_loader, val_loader = load_data()
-    ohe_groups = [v for v in match_columns(FEATURE_COLS, ORIG_COLUMNS).values()
-                  if len(v) > 1]
-    num_idx = [i for i in range(X_all.shape[1]) if all(i not in grp for grp in ohe_groups)]
+X_all, y_all, train_loader, val_loader = load_data()
+ohe_groups = [v for v in match_columns(FEATURE_COLS, ORIG_COLUMNS).values()
+              if len(v) > 1]
+num_idx = [i for i in range(X_all.shape[1]) if all(i not in grp for grp in ohe_groups)]
 
-    model = Classifier(X_all.shape[1])
-    criterion = nn.BCELoss()
-    optimizer = Adam(model.parameters(), lr=1e-3)
-    model = pretrain(model, train_loader, val_loader, criterion, optimizer, epochs=100)
-    model.eval()
+model = Classifier(X_all.shape[1])
+criterion = nn.BCELoss()
+optimizer = Adam(model.parameters(), lr=1e-3)
+model = pretrain(model, train_loader, val_loader, criterion, optimizer, epochs=100)
+model.eval()
 
-    print("\nComputing explanations for all explainers on the full data ...")
-    n, f = X_all.shape
-    exp_by_explainer = {}
-    for E in EXPLAINERS:
-        torch.manual_seed(seed)  # deterministic stochastic explainers (smoothgrad, gradshap)
-        exp_by_explainer[E] = _attribution_matrix(make_explainer(E, model)(X_all), n, f)
-        print(f"  {E}: done")
+print("\nComputing explanations for all explainers on the full data ...")
+n, f = X_all.shape
+exp_by_explainer = {}
+for E in EXPLAINERS:
+    torch.manual_seed(seed)  # deterministic stochastic explainers (smoothgrad, gradshap)
+    exp_by_explainer[E] = _attribution_matrix(make_explainer(E, model)(X_all), n, f)
+    print(f"  {E}: done")
 
-    print("\n=== stability sensitivity (cluster agreement) ===")
-    stab_df, stab_order = run_stability_sensitivity(X_all, exp_by_explainer)
-    print("\n=== structural discrepancy sensitivity ===")
-    disc_df, disc_order = run_discrepancy_sensitivity(X_all, exp_by_explainer)
-    print("\n=== robustness sensitivity ===")
-    rob_df, rob_valid_df, rob_order = run_robustness_sensitivity(
-        X_all, model, exp_by_explainer, num_idx, ohe_groups)
+print("\n=== stability sensitivity (cluster agreement) ===")
+stab_df, stab_order = run_stability_sensitivity(X_all, exp_by_explainer)
+print("\n=== structural discrepancy sensitivity ===")
+disc_df, disc_order = run_discrepancy_sensitivity(X_all, exp_by_explainer)
+print("\n=== robustness sensitivity ===")
+rob_df, rob_valid_df, rob_order = run_robustness_sensitivity(
+    X_all, model, exp_by_explainer, num_idx, ohe_groups)
 
-    # ---- pivot tables: explainer x configuration ----
-    stab_pivot = pivot_by_config(stab_df, "ARI_max", stab_order)
-    base_cfg = stab_order[0]
-    cvi_table = (stab_df[stab_df["config"] == base_cfg]
-                 .set_index("explainer")[["ARI_max", "AMI_max", "V_max", "ARI_mean"]]
-                 .round(4))
-    disc_pivot = pivot_by_config(disc_df, "SimDiscrepancy", disc_order)
-    rob_pivot = pivot_by_config(rob_df, "Robustness", rob_order)
-    rob_valid_pivot = pivot_by_config(rob_valid_df, "valid_rate", rob_order)
+# ---- pivot tables: explainer x configuration ----
+stab_pivot = pivot_by_config(stab_df, "ARI_max", stab_order)
+base_cfg = stab_order[0]
+cvi_table = (stab_df[stab_df["config"] == base_cfg]
+             .set_index("explainer")[["ARI_max", "AMI_max", "V_max", "ARI_mean"]]
+             .round(4))
+disc_pivot = pivot_by_config(disc_df, "SimDiscrepancy", disc_order)
+rob_pivot = pivot_by_config(rob_df, "Robustness", rob_order)
+rob_valid_pivot = pivot_by_config(rob_valid_df, "valid_rate", rob_order)
 
-    print("\n=== Stability (ARI, max over k-grid) per configuration ===")
-    print(stab_pivot.to_string())
-    print("\n=== Stability: cluster validity index choice (baseline clustering) ===")
-    print(cvi_table.to_string())
-    print("\n=== Structural discrepancy per configuration (lower = better) ===")
-    print(disc_pivot.to_string())
-    print("\n=== Robustness per configuration ===")
-    print(rob_pivot.to_string())
-    print("\n=== Robustness: accepted-neighbor rate per configuration ===")
-    print(rob_valid_pivot.to_string())
+print("\n=== Stability (ARI, max over k-grid) per configuration ===")
+print(stab_pivot.to_string())
+print("\n=== Stability: cluster validity index choice (baseline clustering) ===")
+print(cvi_table.to_string())
+print("\n=== Structural discrepancy per configuration (lower = better) ===")
+print(disc_pivot.to_string())
+print("\n=== Robustness per configuration ===")
+print(rob_pivot.to_string())
+print("\n=== Robustness: accepted-neighbor rate per configuration ===")
+print(rob_valid_pivot.to_string())
 
-    # ---- rank-stability summary ----
-    summary_df = pd.concat([
-        rank_summary(stab_pivot, higher_better=True).assign(
-            family="stability (ARI, max over k-grid)"),
-        rank_summary(cvi_table, higher_better=True).assign(
-            family="stability: CVI choice (same clustering)"),
-        rank_summary(disc_pivot, higher_better=False).assign(
-            family="structural discrepancy (lower = better)"),
-        rank_summary(rob_pivot, higher_better=True).assign(
-            family="robustness"),
-    ], ignore_index=True).round(4)
+# ---- rank-stability summary ----
+summary_df = pd.concat([
+    rank_summary(stab_pivot, higher_better=True).assign(
+        family="stability (ARI, max over k-grid)"),
+    rank_summary(cvi_table, higher_better=True).assign(
+        family="stability: CVI choice (same clustering)"),
+    rank_summary(disc_pivot, higher_better=False).assign(
+        family="structural discrepancy (lower = better)"),
+    rank_summary(rob_pivot, higher_better=True).assign(
+        family="robustness"),
+], ignore_index=True).round(4)
 
-    print("\n=== Explainer-ranking stability across implementation choices ===")
-    print(summary_df.to_string(index=False))
-    print("\nInterpretation: spearman/kendall close to 1.0 -> the explainer ranking")
-    print("is insensitive to the implementation choice; large relative score changes")
-    print("with stable rankings -> the absolute numbers depend on the choice, the")
-    print("comparison does not. (z_E and delta changes shift scores by construction.)")
+print("\n=== Explainer-ranking stability across implementation choices ===")
+print(summary_df.to_string(index=False))
+print("\nInterpretation: spearman/kendall close to 1.0 -> the explainer ranking")
+print("is insensitive to the implementation choice; large relative score changes")
+print("with stable rankings -> the absolute numbers depend on the choice, the")
+print("comparison does not. (z_E and delta changes shift scores by construction.)")
 
-    stab_pivot.to_csv("results/sensitivity_stability.csv")
-    cvi_table.to_csv("results/sensitivity_stability_cvi.csv")
-    disc_pivot.to_csv("results/sensitivity_discrepancy.csv")
-    rob_pivot.to_csv("results/sensitivity_robustness.csv")
-    rob_valid_pivot.to_csv("results/sensitivity_robustness_validrate.csv")
-    summary_df.to_csv("results/sensitivity_summary.csv", index=False)
-
-
-if __name__ == "__main__":
-    torch.set_default_dtype(torch.float64)
-    main()
+stab_pivot.to_csv("results/sensitivity_stability.csv")
+cvi_table.to_csv("results/sensitivity_stability_cvi.csv")
+disc_pivot.to_csv("results/sensitivity_discrepancy.csv")
+rob_pivot.to_csv("results/sensitivity_robustness.csv")
+rob_valid_pivot.to_csv("results/sensitivity_robustness_validrate.csv")
+summary_df.to_csv("results/sensitivity_summary.csv", index=False)

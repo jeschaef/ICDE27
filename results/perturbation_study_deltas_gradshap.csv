@@ -1,0 +1,6 @@
+variant,rel_dist_to_orig,ValAcc,Stability,Robustness,valid_rate,Infidelity,MaxSensitivity,Faithfulness
+small_noise,0.081,0.0,-0.0797,-0.0005,0.0,-0.0001,-0.0277,-0.0035
+large_noise,0.7943,0.0,-0.1276,-0.071,0.0,-0.0001,-0.246,-0.1788
+instance_permutation,1.8029,0.0,-0.4362,-0.027,0.0,0.0053,0.84,-0.2496
+constant,0.7699,0.0,-0.4786,0.1289,0.0,0.0005,1.9228,-0.2795
+random,2.0259,0.0,-0.4401,-0.1384,0.0,0.0121,0.48,-0.8807

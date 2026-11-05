@@ -1,0 +1,35 @@
+config,spearman_vs_baseline,kendall_vs_baseline,mean_abs_rel_change,max_abs_rel_change,best_explainer,family
+"baseline (kmeans, n=500)",1.0,1.0,0.0,0.0,gradshap,"stability (ARI, max over k-grid)"
+algo=agg-avg,0.9273,0.8,0.5277,0.8901,ig,"stability (ARI, max over k-grid)"
+algo=agg-complete,0.8909,0.8,0.6757,0.9195,gradshap,"stability (ARI, max over k-grid)"
+d_X=cityblock,0.9273,0.8,0.5495,0.857,ig,"stability (ARI, max over k-grid)"
+d_X=cosine,0.9273,0.8,0.5322,0.8809,ig,"stability (ARI, max over k-grid)"
+d_E=cityblock,0.9636,0.9,0.5489,0.859,gradshap,"stability (ARI, max over k-grid)"
+d_E=cosine,0.8441,0.6669,2.0436,4.34,gradshap,"stability (ARI, max over k-grid)"
+n_inst=100,1.0,1.0,0.3611,0.5952,gradshap,"stability (ARI, max over k-grid)"
+n_inst=2000 (n=531),0.8909,0.8,0.2736,0.6602,gradshap,"stability (ARI, max over k-grid)"
+ARI_max,1.0,1.0,0.0,0.0,gradshap,stability: CVI choice (same clustering)
+AMI_max,0.9636,0.9,0.5381,0.9119,gradshap,stability: CVI choice (same clustering)
+V_max,0.8909,0.8,0.6334,1.0393,gradshap,stability: CVI choice (same clustering)
+ARI_mean,0.8909,0.8,0.6685,0.8514,gradshap,stability: CVI choice (same clustering)
+"baseline (m=64, pairs=512, L2/L2)",1.0,1.0,0.0,0.0,gradshap,structural discrepancy (lower = better)
+m=32,0.8545,0.7,0.0685,0.0875,ig,structural discrepancy (lower = better)
+m=128,0.8909,0.8,0.1251,0.3946,ig,structural discrepancy (lower = better)
+m=256,1.0,1.0,0.1523,0.2793,gradshap,structural discrepancy (lower = better)
+pairs=128,0.8545,0.7,0.1365,0.1789,ig,structural discrepancy (lower = better)
+pairs=2048,1.0,1.0,0.0499,0.0596,gradshap,structural discrepancy (lower = better)
+d_X=L1,0.9636,0.9,0.4269,0.4648,ig,structural discrepancy (lower = better)
+d_X=cosine,0.9636,0.9,0.3707,0.4405,ig,structural discrepancy (lower = better)
+d_E=L1,1.0,1.0,0.0467,0.1083,gradshap,structural discrepancy (lower = better)
+d_E=cosine,0.2727,0.2,0.2805,0.4435,gxa,structural discrepancy (lower = better)
+baseline,1.0,1.0,0.0,0.0,smoothgrad_sq,robustness
+delta=0.1,1.0,1.0,0.0012,0.0019,smoothgrad_sq,robustness
+delta=0.4,1.0,1.0,0.0031,0.0045,smoothgrad_sq,robustness
+perturb=uniform,1.0,1.0,0.0007,0.0014,smoothgrad_sq,robustness
+perturb=laplace,1.0,1.0,0.0006,0.0018,smoothgrad_sq,robustness
+z_E=q0.50,-0.4909,-0.3,0.6446,0.7391,gradshap,robustness
+z_E=q0.99,1.0,1.0,0.0771,0.1053,smoothgrad_sq,robustness
+z_E=q1.00,0.4182,0.3,0.1447,0.1967,smoothgrad_sq,robustness
+k=25,1.0,1.0,0.004,0.0105,smoothgrad_sq,robustness
+k=200,1.0,1.0,0.0019,0.0038,smoothgrad_sq,robustness
+criterion=all,0.8909,0.8,0.0478,0.0771,smoothgrad_sq,robustness
