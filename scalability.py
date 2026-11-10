@@ -1,13 +1,13 @@
 '''
-Scalability & computational-efficiency analysis of CRMO.
+Scalability & computational-efficiency analysis of CRMO on COMPAS.
 
 Goal
 ----
-Show how the framework behaves as the dataset grows. The cohort dataset is
+Show how the framework behaves as the dataset grows. The COMPAS dataset is
 resampled to the target sizes (500 / 5000 / 10000); sizes beyond the available
-rows are bootstrap-resampled from the real cohort (or read from
-LARGE_DATA_FILE when provided), so only n grows while the feature distribution
-stays the real one. For every size a fresh classifier is pretrained and:
+rows are bootstrap-resampled from the real data, so only n grows while the
+feature distribution stays the real one. For every size a fresh classifier is
+pretrained and:
 
     * explanation generation is timed on the full dataset,
     * the stability metric (KMeans over the k-grid) is timed,
@@ -23,14 +23,32 @@ stays the real one. For every size a fresh classifier is pretrained and:
 The compute budget (explainer, m, k, batch_size, delta, CRMO epochs) is fixed
 across sizes, so time differences come from n only.
 
+Data loading (no openxai dependency), in order of preference:
+    1. data/compas_two_years.csv   ProPublica format, cached download
+    2. data/compas.csv             OpenXAI format, if you exported it
+    3. download compas-scores-two-years.csv from the ProPublica repo -> (1)
+    4. download compas.csv from an OpenXAI GitHub mirror -> (2)
+    5. synthetic COMPAS replica with the same schema (offline smoke run,
+       marked 'synthetic' in the output)
+
+The ProPublica file is preprocessed with the standard two-year filter
+(|days_b_screening_arrest| <= 30, is_recid != -1, charge degree != 'O',
+score_text != 'N/A'), yielding ~6.2k rows. Race is a six-column one-hot group
+(perturbations switch the active category within the group); age, the juvenile
+/prior counts and jail length-of-stay are z-scored continuous features; sex
+and charge degree are binary. The OpenXAI-format CSV keeps its own dummy
+encoding with race / age / crime one-hot groups.
+
 Outputs:
     results/crmo_scalability.csv        one row per dataset size
     results/crmo_scalability_times.png  phase times vs n (log-log)
 '''
 import copy
 import gc
+import os
 import threading
 import time
+import urllib.request
 import warnings
 
 import numpy as np
@@ -47,12 +65,11 @@ from torch.utils.data import TensorDataset, DataLoader, WeightedRandomSampler
 from crmo import CRMO, make_explainer, compute_maxv, _euclidean
 from robustness import robustness_torch
 from stability import stability
-from util import match_columns
 
 # ------------------------------ configuration ------------------------------
 seed = 199
 EXPLAINER = "grad"          # per-step CRMO cost scales with the explainer;
-# "grad" is the cheapest differentiable surrogate
+                            # "grad" is the cheapest differentiable surrogate
 SIZES = [500, 5000, 10000]
 
 delta = 0.2                 # perturbation radius (metrics + CRMO)
@@ -69,24 +86,38 @@ pretrain_lr = 1e-3
 
 maxv_cap = 5000             # cap the O(n^2) cdist in compute_maxv on large data
 
-DATA_FILE = "data/classified_cohort_XGBoost_scaled_complete_avg_cohort_oversampling_smote_11_44_52.csv"
-LARGE_DATA_FILE = None      # optional CSV (FEATURE_COLS + 'class') for sizes
-# beyond the cohort; bootstrap is used otherwise
+# ----------------------------- COMPAS data urls ----------------------------
+DATA_DIR = "data"
+LABEL_COL = "label"
+LOCAL_PROPUBLICA_CSV = os.path.join(DATA_DIR, "compas_two_years.csv")
+LOCAL_OPENXAI_CSV = os.path.join(DATA_DIR, "compas.csv")
+PROPUBLICA_URL = ("https://raw.githubusercontent.com/propublica/compas-analysis/"
+                  "master/compas-scores-two-years.csv")
+OPENXAI_URLS = [
+    "https://raw.githubusercontent.com/fundthmcalculus/OpenXAI/main/data/compas.csv",
+    "https://raw.githubusercontent.com/AgnarKorth/OpenXAI/main/data/compas.csv",
+]
 
-FEATURE_COLS = ['age', 'Anion Gap', 'Bicarbonate', 'Chloride (whole blood)',
-                'Creatinine', 'electivesurgery', 'gcs', 'gender', 'Heart Rate',
-                'mechvent', 'O2 saturation pulseoxymetry', 'oasis',
-                'Sodium (whole blood)', 'stroke_type', 'White Blood Cells',
-                'admission_type_0', 'admission_type_1', 'admission_type_2',
-                'dbsource_-1', 'dbsource_0', 'dbsource_1', 'ethnicity_0',
-                'ethnicity_1', 'ethnicity_2', 'ethnicity_3', 'ethnicity_4',
-                'ethnicity_5']
+# OpenXAI-format schema (binary dummy encoding of the categoricals)
+OPENXAI_LABEL_CANDIDATES = ["Two_yr_Recidivism", "two_yr_recidivism", "label", "class"]
+OPENXAI_FEATURE_COLS = ['African_American', 'Asian', 'Caucasian', 'Hispanic',
+                        'Native_American', 'Other',
+                        'Age_Above_FourtyFive', 'Age_Below_TwentyFive',
+                        'Female', 'Misdemeanor', 'Felony',
+                        'Offenses_Committed', 'Number_of_Priors']
+OPENXAI_OHE_GROUPS = {
+    "race": ['African_American', 'Asian', 'Caucasian', 'Hispanic',
+             'Native_American', 'Other'],
+    "age": ['Age_Above_FourtyFive', 'Age_Below_TwentyFive'],
+    "crime": ['Misdemeanor', 'Felony'],
+}
+OPENXAI_CONTINUOUS = ['Offenses_Committed', 'Number_of_Priors']
 
-ORIG_COLUMNS = ['age', 'Anion Gap', 'Bicarbonate', 'Chloride (whole blood)',
-                'Creatinine', 'electivesurgery', 'gcs', 'gender', 'Heart Rate',
-                'mechvent', 'O2 saturation pulseoxymetry', 'oasis',
-                'Sodium (whole blood)', 'stroke_type', 'White Blood Cells',
-                'admission_type', 'dbsource', 'ethnicity']
+# ProPublica-format schema (built from the raw columns of the two-years file)
+RACE_COLS = ["race_African_American", "race_Asian", "race_Caucasian",
+             "race_Hispanic", "race_Native_American", "race_Other"]
+PROPUBLICA_CONTINUOUS = ["age", "juv_fel_count", "juv_misd_count",
+                         "juv_other_count", "priors_count"]
 
 COL_ORDER = ["n", "source", "val_acc",
              "explain_time_s", "maxv_time_s", "stability_time_s", "robustness_time_s",
@@ -97,6 +128,193 @@ COL_ORDER = ["n", "source", "val_acc",
              "robustness_comparisons", "robustness_valid_perturbations",
              "peak_rss_mb_explain", "peak_rss_mb_stability", "peak_rss_mb_robustness",
              "peak_rss_mb_crmo"]
+
+
+# --------------------------------- data ------------------------------------
+def _zscore(df, cols):
+    '''Z-score the continuous columns in place (binary dummies pass through),
+    so delta=0.2 keeps its meaning in units of per-feature spread.'''
+    for col in cols:
+        if col in df.columns and df[col].std() > 0:
+            df[col] = (df[col] - df[col].mean()) / df[col].std()
+
+
+def _schema_propublica(df, source):
+    '''
+    ProPublica compas-scores-two-years.csv -> canonical schema. Applies the
+    standard two-year analysis filter, builds the race one-hot group and a
+    binary sex / charge-degree encoding.
+    '''
+    required = ["two_year_recid", "age", "sex", "race", "c_charge_degree",
+                "priors_count", "juv_fel_count", "juv_misd_count", "juv_other_count"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"missing expected column(s) {missing}; "
+                         f"found: {list(df.columns)[:25]} ...")
+
+    # Standard two-year filter (ProPublica's own analysis protocol).
+    if "days_b_screening_arrest" in df.columns:
+        df = df[df["days_b_screening_arrest"].between(-30, 30)]
+    if "is_recid" in df.columns:
+        df = df[df["is_recid"] != -1]
+    df = df[df["c_charge_degree"] != "O"]
+    if "score_text" in df.columns:
+        df = df[df["score_text"] != "N/A"]
+
+    out = pd.DataFrame(index=df.index)
+    continuous = list(PROPUBLICA_CONTINUOUS)
+    for c in PROPUBLICA_CONTINUOUS:
+        out[c] = pd.to_numeric(df[c], errors="coerce")
+    if {"c_jail_in", "c_jail_out"} <= set(df.columns):
+        stay = (pd.to_datetime(df["c_jail_out"], errors="coerce")
+                - pd.to_datetime(df["c_jail_in"], errors="coerce")).dt.total_seconds() / 86400.0
+        out["length_of_stay"] = stay.fillna(stay.median()).clip(lower=0)
+        continuous.append("length_of_stay")
+
+    out["sex_female"] = (df["sex"].astype(str).str.lower() == "female").astype(float)
+    out["charge_felony"] = (df["c_charge_degree"].astype(str).str.upper() == "F").astype(float)
+
+    # Race one-hot group; rare/unknown values are bucketed into race_Other.
+    race_norm = df["race"].astype(str).str.lower().str.strip()
+    race_map = {"african-american": "race_African_American", "caucasian": "race_Caucasian",
+                "hispanic": "race_Hispanic", "asian": "race_Asian",
+                "native american": "race_Native_American"}
+    mapped = race_norm.map(race_map).fillna("race_Other")
+    for col in RACE_COLS:
+        out[col] = (mapped == col).astype(float)
+
+    out[LABEL_COL] = pd.to_numeric(df["two_year_recid"], errors="coerce")
+    out = out.dropna().reset_index(drop=True)
+    _zscore(out, continuous)
+
+    print(f"  ProPublica two-year filter: {len(out)} rows, "
+          f"{out.shape[1] - 1} features, continuous={continuous}")
+    return out, {"race": list(RACE_COLS)}, continuous, source
+
+
+def _schema_openxai(df, source):
+    '''
+    OpenXAI-format compas.csv -> canonical schema (case-insensitive column
+    matching, race / age / crime dummy groups kept as one-hot groups).
+    '''
+    lookup = {c.lower().strip(): c for c in df.columns}
+    label = next((lookup[c.lower()] for c in OPENXAI_LABEL_CANDIDATES
+                  if c.lower() in lookup), None)
+    if label is None:
+        raise ValueError(f"no label column found; found: {list(df.columns)[:25]} ...")
+    missing = [c for c in OPENXAI_FEATURE_COLS if c.lower() not in lookup]
+    if missing:
+        raise ValueError(f"missing expected column(s) {missing}; "
+                         f"found: {list(df.columns)[:25]} ...")
+    rename = {lookup[c.lower()]: c for c in OPENXAI_FEATURE_COLS + [label]}
+    out = df.rename(columns=rename)[OPENXAI_FEATURE_COLS + [label]].astype(float)
+    out = out.rename(columns={label: LABEL_COL}).dropna().reset_index(drop=True)
+    _zscore(out, OPENXAI_CONTINUOUS)
+    print(f"  OpenXAI schema: {len(out)} rows, {len(OPENXAI_FEATURE_COLS)} features")
+    return out, {k: list(v) for k, v in OPENXAI_OHE_GROUPS.items()}, \
+        list(OPENXAI_CONTINUOUS), source
+
+
+def _synthetic_compas(n=12000):
+    '''
+    Binary replica with the OpenXAI compas schema for offline smoke runs.
+    Marked 'synthetic' in the output -- do not present these rows as real-data
+    scalability results.
+    '''
+    rng = np.random.RandomState(seed)
+    race_names = ["African_American", "Asian", "Caucasian", "Hispanic",
+                  "Native_American", "Other"]
+    race = rng.choice(6, size=n, p=[0.51, 0.01, 0.34, 0.02, 0.01, 0.11])
+    out = {name: (race == i).astype(float) for i, name in enumerate(race_names)}
+    age = rng.normal(34, 10, n)
+    out["Age_Above_FourtyFive"] = (age > 45).astype(float)
+    out["Age_Below_TwentyFive"] = (age < 25).astype(float)
+    out["Female"] = (rng.rand(n) < 0.2).astype(float)
+    misd = (rng.rand(n) < 0.3).astype(float)
+    out["Misdemeanor"] = misd
+    out["Felony"] = 1 - misd
+    out["Number_of_Priors"] = rng.poisson(3.0, n).astype(float)
+    out["Offenses_Committed"] = rng.poisson(1.0, n).astype(float)
+    logit = (0.9 * out["Age_Below_TwentyFive"] - 0.4 * out["Age_Above_FourtyFive"]
+             + 0.15 * out["Number_of_Priors"] - 1.1 * out["Female"]
+             + 0.3 * out["Felony"] - 0.5)
+    p = 1.0 / (1.0 + np.exp(-logit))
+    out["Two_yr_Recidivism"] = (rng.rand(n) < p).astype(float)
+    return pd.DataFrame(out)
+
+
+def _download(url, dest, timeout=60):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    print(f"  downloading {url} -> {dest} ...")
+    with urllib.request.urlopen(url, timeout=timeout) as r, open(dest, "wb") as f:
+        f.write(r.read())
+
+
+def load_compas():
+    '''
+    Fallback chain from the module docstring. Returns
+    (dataframe with features + LABEL_COL, ohe groups dict, continuous cols, source).
+    '''
+    if os.path.exists(LOCAL_PROPUBLICA_CSV):
+        try:
+            return _schema_propublica(pd.read_csv(LOCAL_PROPUBLICA_CSV),
+                                      f"local ({LOCAL_PROPUBLICA_CSV})")
+        except ValueError as e:
+            print(f"  {LOCAL_PROPUBLICA_CSV} does not match the ProPublica schema: {e}")
+    if os.path.exists(LOCAL_OPENXAI_CSV):
+        try:
+            return _schema_openxai(pd.read_csv(LOCAL_OPENXAI_CSV),
+                                   f"local ({LOCAL_OPENXAI_CSV})")
+        except ValueError as e:
+            print(f"  {LOCAL_OPENXAI_CSV} does not match the OpenXAI schema: {e}")
+
+    try:
+        _download(PROPUBLICA_URL, LOCAL_PROPUBLICA_CSV)
+        return _schema_propublica(pd.read_csv(LOCAL_PROPUBLICA_CSV),
+                                  f"download (ProPublica) -> {LOCAL_PROPUBLICA_CSV}")
+    except Exception as e:
+        print(f"  ProPublica download failed: {e}")
+    for url in OPENXAI_URLS:
+        try:
+            _download(url, LOCAL_OPENXAI_CSV)
+            return _schema_openxai(pd.read_csv(LOCAL_OPENXAI_CSV),
+                                   f"download (OpenXAI mirror) -> {LOCAL_OPENXAI_CSV}")
+        except Exception as e:
+            print(f"  OpenXAI mirror failed ({url}): {e}")
+
+    print("  falling back to a synthetic COMPAS replica (offline smoke run).")
+    return _schema_openxai(_synthetic_compas(), "synthetic")
+
+
+def build_dataset(base_df, n_target):
+    '''
+    Subsample COMPAS to n_target rows; when n_target exceeds the available
+    rows, bootstrap-resample with replacement. Only n grows; the feature
+    distribution stays the real one.
+    '''
+    feature_cols = [c for c in base_df.columns if c != LABEL_COL]
+    replace = n_target > len(base_df)
+    source = "bootstrap" if replace else "compas"
+    sample = base_df.sample(n=n_target, replace=replace, random_state=seed)
+    X = torch.tensor(sample[feature_cols].values.astype(np.float64), dtype=torch.float64)
+    y = torch.tensor(sample[[LABEL_COL]].values.astype(np.float64), dtype=torch.float64)
+    return X, y, source
+
+
+def make_loaders(X, y):
+    X_tr, X_va, y_tr, y_va = train_test_split(
+        X.numpy(), y.numpy(), test_size=0.2, random_state=42, stratify=y.numpy().ravel())
+    X_tr, y_tr = torch.as_tensor(X_tr), torch.as_tensor(y_tr)
+    X_va, y_va = torch.as_tensor(X_va), torch.as_tensor(y_va)
+
+    _, counts = torch.unique(y, return_counts=True)
+    class_weights = [counts.sum() / c for c in counts]
+    samples_weight = [class_weights[int(c[0])] for c in y_tr]
+    sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
+    train_loader = DataLoader(TensorDataset(X_tr, y_tr),
+                              batch_size=batch_size, sampler=sampler)
+    val_loader = DataLoader(TensorDataset(X_va, y_va), batch_size=batch_size)
+    return train_loader, val_loader
 
 
 # --------------------------- memory measurement ----------------------------
@@ -171,47 +389,6 @@ def time_phase(fn, *args, **kwargs):
     return result, seconds, peak[0]
 
 
-# --------------------------------- data ------------------------------------
-def load_cohort():
-    df = pd.read_csv(DATA_FILE)
-    return df[FEATURE_COLS + ["class"]]
-
-
-def build_dataset(base_df, n_target):
-    '''
-    Subsample the cohort to n_target rows; when n_target exceeds the available
-    rows, bootstrap-resample with replacement (or sample LARGE_DATA_FILE when
-    provided). Only n grows; the feature distribution stays the real one.
-    '''
-    pool, source = base_df, "cohort"
-    if n_target > len(pool) and LARGE_DATA_FILE is not None:
-        pool = pd.read_csv(LARGE_DATA_FILE)[FEATURE_COLS + ["class"]]
-        source = "large_file"
-    replace = n_target > len(pool)
-    if replace:
-        source = "bootstrap"
-    sample = pool.sample(n=n_target, replace=replace, random_state=seed)
-    X = torch.tensor(sample[FEATURE_COLS].values, dtype=torch.float64)
-    y = torch.tensor(sample[["class"]].values, dtype=torch.float64)
-    return X, y, source
-
-
-def make_loaders(X, y):
-    X_tr, X_va, y_tr, y_va = train_test_split(
-        X.numpy(), y.numpy(), test_size=0.2, random_state=42, stratify=y.numpy().ravel())
-    X_tr, y_tr = torch.as_tensor(X_tr), torch.as_tensor(y_tr)
-    X_va, y_va = torch.as_tensor(X_va), torch.as_tensor(y_va)
-
-    _, counts = torch.unique(y, return_counts=True)
-    class_weights = [counts.sum() / c for c in counts]
-    samples_weight = [class_weights[int(c[0])] for c in y_tr]
-    sampler = WeightedRandomSampler(samples_weight, len(samples_weight))
-    train_loader = DataLoader(TensorDataset(X_tr, y_tr),
-                              batch_size=batch_size, sampler=sampler)
-    val_loader = DataLoader(TensorDataset(X_va, y_va), batch_size=batch_size)
-    return train_loader, val_loader
-
-
 # --------------------------------- model -----------------------------------
 class Classifier(nn.Module):
     def __init__(self, in_features):
@@ -267,7 +444,8 @@ def pretrain(model, train_loader, val_loader, criterion, optimizer, epochs):
             max_accuracy, best_state = val_accuracy, copy.deepcopy(model.state_dict())
         pbar.set_description(f"pretrain {epoch + 1}/{epochs} | val acc {val_accuracy:.4f}")
     model.load_state_dict(best_state)
-    return model, float(np.mean(epoch_times[1:]))
+    mean_epoch = float(np.mean(epoch_times[1:])) if len(epoch_times) > 1 else float(epoch_times[0])
+    return model, mean_epoch
 
 
 # ------------------------------ per-size run -------------------------------
@@ -357,14 +535,20 @@ torch.set_default_dtype(torch.float64)
 torch.manual_seed(seed)
 np.random.seed(seed)
 
-print(f"CRMO scalability: explainer={EXPLAINER}, sizes={SIZES}, m={m}, k={k}, "
-      f"batch={batch_size}, delta={delta}, crmo epochs={crmo_epochs}")
+print(f"CRMO scalability on COMPAS: explainer={EXPLAINER}, sizes={SIZES}, m={m}, "
+      f"k={k}, batch={batch_size}, delta={delta}, crmo epochs={crmo_epochs}")
 print("Budget is fixed across sizes; time differences come from n only.\n")
 
-base_df = load_cohort()
-ohe_groups = [v for v in match_columns(FEATURE_COLS, ORIG_COLUMNS).values()
-              if len(v) > 1]
-num_idx = [i for i in range(len(FEATURE_COLS)) if all(i not in grp for grp in ohe_groups)]
+base_df, ohe_group_names, continuous_cols, data_source = load_compas()
+feature_cols = [c for c in base_df.columns if c != LABEL_COL]
+ohe_groups = [[feature_cols.index(c) for c in group] for group in ohe_group_names.values()]
+num_idx = [i for i, c in enumerate(feature_cols)
+           if all(c not in group for group in ohe_group_names.values())]
+
+print(f"Loaded COMPAS: {len(base_df)} rows, {len(feature_cols)} features "
+      f"(source: {data_source})")
+print(f"  one-hot groups: { {k: len(v) for k, v in ohe_group_names.items()} }, "
+      f"noise-perturbed columns: {len(num_idx)}, z-scored: {continuous_cols}\n")
 
 rows = []
 for n in SIZES:
@@ -373,7 +557,7 @@ for n in SIZES:
     gc.collect()
 
 report_df = pd.DataFrame(rows)[COL_ORDER]
-print("\n=== CRMO scalability per dataset size ===")
+print("\n=== CRMO scalability per dataset size (COMPAS) ===")
 print(report_df.to_string(index=False))
 report_df.to_csv("results/crmo_scalability.csv", index=False)
 
@@ -396,7 +580,7 @@ ax.set_xscale("log")
 ax.set_yscale("log")
 ax.set_xlabel("dataset size n")
 ax.set_ylabel("seconds")
-ax.set_title(f"CRMO scalability ({EXPLAINER}, m={m}, k={k}, batch={batch_size})")
+ax.set_title(f"CRMO scalability (COMPAS, {EXPLAINER}, m={m}, k={k}, batch={batch_size})")
 ax.legend()
 fig.tight_layout()
 fig.savefig("results/crmo_scalability_times.png", dpi=150)
@@ -406,4 +590,6 @@ print("\nInterpretation: explanation generation and CRMO per-epoch time scale")
 print("linearly with n (fixed batch and per-step budget); stability adds")
 print("KMeans fits on n points; maxv is O(n^2) and therefore capped at")
 print(f"maxv_cap={maxv_cap} on large data; robustness is n-independent by")
-print("construction (fixed m x k perturbation budget).")
+print("construction (fixed m x k perturbation budget). Sizes beyond the")
+print(f"real pool ({len(base_df)} rows) are bootstrap-resampled, reported in")
+print("the 'source' column.")

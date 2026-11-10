@@ -393,7 +393,8 @@ def run_stability_sensitivity(X_all, exp_by_explainer):
             cvi = compute_cvi(models, S_MIN_K, S_MAX_K)
             rows.append({"explainer": E, "config": cfg_name,
                          "ARI_max": float(cvi[0].max()), "AMI_max": float(cvi[1].max()),
-                         "V_max": float(cvi[2].max()), "ARI_mean": float(cvi[0].mean())})
+                         "V_max": float(cvi[2].max()), "ARI_mean": float(cvi[0].mean()),
+                         "AMI_mean": float(cvi[1].mean()), "V_mean": float(cvi[2].mean())})
         print(f"  stability config done: {cfg_name}")
     return pd.DataFrame(rows), [c[0] for c in configs]
 
@@ -481,7 +482,7 @@ rob_df, rob_valid_df, rob_order = run_robustness_sensitivity(
 stab_pivot = pivot_by_config(stab_df, "ARI_max", stab_order)
 base_cfg = stab_order[0]
 cvi_table = (stab_df[stab_df["config"] == base_cfg]
-             .set_index("explainer")[["ARI_max", "AMI_max", "V_max", "ARI_mean"]]
+             .set_index("explainer")[["ARI_max", "AMI_max", "V_max", "ARI_mean", "AMI_mean", "V_mean"]]
              .round(4))
 disc_pivot = pivot_by_config(disc_df, "SimDiscrepancy", disc_order)
 rob_pivot = pivot_by_config(rob_df, "Robustness", rob_order)
