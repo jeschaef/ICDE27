@@ -93,4 +93,3 @@ after / diff rows) and per-configuration loss-curve PNGs.
   per-run CSV keeps the raw values.
 - Hardware note: timings and peak-RSS numbers are machine-specific — rerun on
   your own hardware for comparable results.
-```
