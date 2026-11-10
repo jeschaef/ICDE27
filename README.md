@@ -40,8 +40,9 @@ pip install -r requirements.txt
 # (optional) GPU build of PyTorch -- see https://pytorch.org for the right wheel
 ```
 
-The vendored package (`GraphXAI`) is imported directly from the
-repository folder.
+The vendored packages (`GraphXAI`, `OpenXAI`) are imported directly from the
+repository folders — no installation needed. If you prefer, you can instead run
+`pip install -e ./OpenXAI` (its `setup.py` pins `captum>=0.4.0`).
 
 ## Data
 
